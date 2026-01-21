@@ -1,0 +1,5 @@
+streamlit
+requests
+icalendar
+recurring-ical-events
+beautifulsoup4
