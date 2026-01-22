@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 from icalendar import Calendar
 import recurring_ical_events
-from datetime import datetime
+from datetime import datetime, timedelta, time
 import re
 
 # --- KONFIGURATION & DATEN ---
@@ -25,8 +25,7 @@ def extrahiere_raum_code(location_str):
     match = re.search(r'([A-Z]\d{3})', str(location_str))
     return match.group(1) if match else None
 
-# Streamlit Caching: Lädt die Kalenderdaten nur einmal pro Tag herunter
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=3600) # Cache für eine Stunde
 def fetch_all_calendars():
     calendars = {}
     for c_id in COURSE_IDS:
@@ -34,57 +33,78 @@ def fetch_all_calendars():
             r = requests.get(f"https://dhbw.app/ical/{c_id}", timeout=10)
             if r.status_code == 200:
                 calendars[c_id] = r.text
-        except:
-            continue
+        except: continue
     return calendars
 
 # --- UI SETUP ---
 st.set_page_config(page_title="DHBW Raumfinder", page_icon="🏫")
 st.title("🏫 DHBW Raum-Checker FN")
-st.write("Finde schnell einen freien Raum zum Lernen.")
 
-gebaeude_filter = st.selectbox("Welches Gebäude?", ["Alle Gebäude", "N (Neubau)", "H (Hauptgebäude)", "E (Elektrotechnik)"])
+gebaeude_filter = st.selectbox("Gebäude wählen:", ["Alle Gebäude", "N (Neubau)", "H (Hauptgebäude)", "E (Elektrotechnik)"])
 filter_char = gebaeude_filter[0] if gebaeude_filter != "Alle Gebäude" else ""
 
-if st.button("Jetzt freie Räume suchen", type="primary"):
-    with st.spinner("Analysiere Vorlesungspläne..."):
+if st.button("Jetzt prüfen", type="primary"):
+    with st.spinner("Analysiere Zeitpläne..."):
         all_data = fetch_all_calendars()
         now = datetime.now()
+        # Zeitbereich für "heute" definieren
+        today_start = datetime.combine(now.date(), time.min)
+        today_end = datetime.combine(now.date(), time.max)
         
         inventar = set()
-        belegt = set()
+        raum_belegungen = {} # raum: [start_zeiten_der_vorlesungen]
 
         for c_id, ics_text in all_data.items():
             try:
                 cal = Calendar.from_ical(ics_text)
-                # Inventar lernen
-                for event in cal.walk('VEVENT'):
-                    r = extrahiere_raum_code(event.get("LOCATION"))
-                    if r: inventar.add(r)
+                # Alle Events für heute laden
+                events_today = recurring_ical_events.of(cal).between(today_start, today_end)
                 
-                # Belegung prüfen
-                active_events = recurring_ical_events.of(cal).at(now)
-                for event in active_events:
-                    r_b = extrahiere_raum_code(event.get("LOCATION"))
-                    if r_b: belegt.add(r_b)
-            except:
-                continue
+                for event in events_today:
+                    raum = extrahiere_raum_code(event.get("LOCATION"))
+                    if raum:
+                        inventar.add(raum)
+                        start = event.get("DTSTART").dt
+                        # Falls Zeitzone im Kalender, auf "naive" umwandeln für Vergleich
+                        if hasattr(start, "tzinfo"): start = start.replace(tzinfo=None)
+                        end = event.get("DTEND").dt
+                        if hasattr(end, "tzinfo"): end = end.replace(tzinfo=None)
+                        
+                        if raum not in raum_belegungen: raum_belegungen[raum] = []
+                        raum_belegungen[raum].append((start, end))
+            except: continue
 
-        # Differenzmenge berechnen
-        frei = inventar - belegt
-        
-        if filter_char:
-            resultat = sorted([r for r in frei if r.startswith(filter_char)])
-        else:
-            resultat = sorted(list(frei))
+        # Ergebnisse auswerten
+        ergebnisse = []
+        for raum in inventar:
+            if filter_char and not raum.startswith(filter_char): continue
+            
+            belegungen = sorted(raum_belegungen.get(raum, []), key=lambda x: x[0])
+            
+            ist_belegt = False
+            naechster_start = None
+            
+            for start, end in belegungen:
+                if start <= now <= end:
+                    ist_belegt = True
+                    break
+                if start > now:
+                    naechster_start = start
+                    break
+            
+            if not ist_belegt:
+                frei_bis = naechster_start.strftime("%H:%M") if naechster_start else "Ende des Tages"
+                ergebnisse.append((raum, frei_bis))
 
-        # Ergebnisse anzeigen
+        # Anzeige
+        ergebnisse.sort()
         st.divider()
-        st.subheader(f"Freie Räume um {now.strftime('%H:%M')} Uhr:")
-        
-        if resultat:
-            cols = st.columns(2) # Zweispaltige Anzeige für Mobile
-            for idx, r in enumerate(resultat):
-                cols[idx % 2].success(f"**{r}**")
+        if ergebnisse:
+            st.subheader(f"Freie Räume (Stand {now.strftime('%H:%M')}):")
+            for raum, bis in ergebnisse:
+                with st.container():
+                    col1, col2 = st.columns([1, 2])
+                    col1.success(f"**{raum}**")
+                    col2.info(f"Frei bis {bis}")
         else:
             st.error("Keine freien Räume gefunden.")
