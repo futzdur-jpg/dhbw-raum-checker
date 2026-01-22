@@ -40,7 +40,7 @@ def fetch_all_calendars():
 st.set_page_config(page_title="DHBW Raumfinder", page_icon="🏫")
 st.title("🏫 DHBW Raum-Checker FN")
 
-gebaeude_filter = st.selectbox("Gebäude wählen:", ["Alle Gebäude", "N (Neubau)", "H (Hauptgebäude)", "E (Elektrotechnik)"])
+gebaeude_filter = st.selectbox("Gebäude wählen:", ["Alle Gebäude", "N Gebäude", "H Gebäude", "E Gebäude"])
 filter_char = gebaeude_filter[0] if gebaeude_filter != "Alle Gebäude" else ""
 
 if st.button("Jetzt prüfen", type="primary"):
@@ -107,4 +107,5 @@ if st.button("Jetzt prüfen", type="primary"):
                     col1.success(f"**{raum}**")
                     col2.info(f"Frei bis {bis}")
         else:
+
             st.error("Keine freien Räume gefunden.")
