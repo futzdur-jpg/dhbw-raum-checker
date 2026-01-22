@@ -12,7 +12,7 @@ from pathlib import Path
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 CACHE_FILE = Path("calendars_cache.json")
 
-# (Die COURSE_IDS Liste bleibt identisch wie zuvor)
+# (Die COURSE_IDS Liste bleibt identisch)
 COURSE_IDS = [
     "FN-TEA22", "FN-TEA23", "FN-TEA23A", "FN-TEA23B", "FN-TEA24A", "FN-TEA24B", "FN-TEA25", "FN-TEA25A", "FN-TEA25B",
     "FN-TEU22", "FN-TEU23", "FN-TEU24", "FN-TEU25", "FN-TFE22-1", "FN-TFE22-2", "FN-TFE23-1", "FN-TFE23-2", "FN-TFE24-1",
@@ -28,7 +28,6 @@ COURSE_IDS = [
 ]
 
 # --- HILFSFUNKTIONEN ---
-
 def extrahiere_raum_code(location_str):
     if not location_str: return None
     match = re.search(r'([A-Z]\d{3})', str(location_str))
@@ -36,8 +35,7 @@ def extrahiere_raum_code(location_str):
 
 def normalize_to_berlin(dt):
     if isinstance(dt, datetime):
-        if dt.tzinfo is None:
-            return BERLIN_TZ.localize(dt)
+        if dt.tzinfo is None: return BERLIN_TZ.localize(dt)
         return dt.astimezone(BERLIN_TZ)
     return dt
 
@@ -45,18 +43,15 @@ def get_today_str():
     return datetime.now(BERLIN_TZ).strftime("%Y-%m-%d")
 
 # --- DATEN-MANAGEMENT ---
-
 def fetch_and_cache_data():
     calendars = {}
     progress_bar = st.progress(0)
     for i, c_id in enumerate(COURSE_IDS):
         try:
             r = requests.get(f"https://dhbw.app/ical/{c_id}", timeout=10)
-            if r.status_code == 200:
-                calendars[c_id] = r.text
+            if r.status_code == 200: calendars[c_id] = r.text
         except: continue
         progress_bar.progress((i + 1) / len(COURSE_IDS))
-    
     cache_content = {"last_sync": get_today_str(), "data": calendars}
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache_content, f, ensure_ascii=False)
@@ -71,14 +66,10 @@ def load_data():
                 return cache_content["data"], True
     return fetch_and_cache_data(), False
 
-# --- DATA PROCESSING ---
-
 def get_room_schedules(all_data, target_date):
     day_start = BERLIN_TZ.localize(datetime.combine(target_date, time.min))
     day_end = BERLIN_TZ.localize(datetime.combine(target_date, time.max))
-    
-    raum_belegungen = {} # raum: [(start, end, summary)]
-    
+    raum_belegungen = {}
     for c_id, ics_text in all_data.items():
         try:
             cal = Calendar.from_ical(ics_text)
@@ -89,9 +80,7 @@ def get_room_schedules(all_data, target_date):
                     start = normalize_to_berlin(event.get("DTSTART").dt)
                     end = normalize_to_berlin(event.get("DTEND").dt)
                     summary = str(event.get("SUMMARY"))
-                    
                     if raum not in raum_belegungen: raum_belegungen[raum] = []
-                    # Dubletten vermeiden (falls Kurs-IDs sich überschneiden)
                     if not any(s == start and e == end for s, e, sum in raum_belegungen[raum]):
                         raum_belegungen[raum].append((start, end, summary))
         except: continue
@@ -105,21 +94,31 @@ all_data, was_cached = load_data()
 current_now = datetime.now(BERLIN_TZ)
 
 with st.sidebar:
-    st.header("Einstellungen")
-    if not was_cached: st.info("Daten wurden frisch synchronisiert.")
-    if st.button("Daten-Update erzwingen"):
+    st.header("Daten-Status")
+    if not was_cached: st.info("Synchronisiert...")
+    if st.button("🔄 Update erzwingen"):
         all_data = fetch_and_cache_data()
         st.rerun()
     st.divider()
-    modus = st.selectbox("Modus wählen:", ["Freie Räume finden", "Raum-Details & Tagesplan"])
+    
+    st.write("**Ansicht wählen:**")
+    # segmented_control ist ideal für Touch (keine Tastatur)
+    modus = st.segmented_control(
+        "Modus", 
+        ["Freie Räume", "Raum-Details"], 
+        default="Freie Räume",
+        label_visibility="collapsed"
+    )
 
 # --- MODUS 1: FREIE RÄUME ---
-if modus == "Freie Räume finden":
+if modus == "Freie Räume":
     col1, col2 = st.columns([1, 1])
     with col1:
-        check_type = st.radio("Zeitpunkt:", ["Jetzt", "Spezifisch"], horizontal=True)
+        st.write("**Zeitpunkt:**")
+        check_type = st.segmented_control("Zeit", ["Jetzt", "Spezifisch"], default="Jetzt", label_visibility="collapsed")
     with col2:
-        gebaeude = st.selectbox("Gebäude:", ["Alle", "N", "H", "E"])
+        st.write("**Gebäude:**")
+        gebaeude = st.segmented_control("Gebäude", ["Alle", "N", "H", "E"], default="Alle", label_visibility="collapsed")
     
     if check_type == "Jetzt":
         target_dt = current_now
@@ -129,18 +128,16 @@ if modus == "Freie Räume finden":
         t = c2.time_input("Uhrzeit:", current_now.time())
         target_dt = BERLIN_TZ.localize(datetime.combine(d, t))
 
-    if st.button("Verfügbarkeit prüfen", type="primary"):
+    if st.button("🔍 Verfügbarkeit prüfen", type="primary"):
         schedules = get_room_schedules(all_data, target_dt.date())
         ergebnisse = []
         filter_char = gebaeude[0] if gebaeude != "Alle" else ""
         
         for raum, events in schedules.items():
             if filter_char and not raum.startswith(filter_char): continue
-            
             belegungen = sorted(events, key=lambda x: x[0])
             ist_belegt = False
             naechster_start = None
-            
             for start, end, summary in belegungen:
                 if start <= target_dt < end:
                     ist_belegt = True
@@ -148,7 +145,6 @@ if modus == "Freie Räume finden":
                 if start > target_dt:
                     naechster_start = start
                     break
-            
             if not ist_belegt:
                 frei_bis = naechster_start.strftime("%H:%M") if naechster_start else "Ende des Tages"
                 ergebnisse.append((raum, frei_bis))
@@ -167,25 +163,23 @@ else:
     schedules = get_room_schedules(all_data, current_now.date())
     alle_raeume = sorted(list(schedules.keys()))
     
-    selected_raum = st.selectbox("Raum suchen oder wählen:", alle_raeume, index=0)
+    st.write("**Raum wählen:**")
+    # Für die lange Liste nutzen wir Selectbox (Keyboard-Suche hier meist nützlich)
+    selected_raum = st.selectbox("Raum auswählen", alle_raeume, label_visibility="collapsed")
     
     if selected_raum:
         st.subheader(f"Tagesplan für Raum {selected_raum}")
         belegungen = sorted(schedules[selected_raum], key=lambda x: x[0])
         
         if not belegungen:
-            st.success("Dieser Raum hat heute keine eingetragenen Vorlesungen.")
+            st.success("Heute keine Vorlesungen eingetragen.")
         else:
             for start, end, summary in belegungen:
                 is_current = start <= current_now < end
-                box_type = "error" if is_current else "warning"
                 label = "🔴 AKTUELL BELEGT" if is_current else "📅 Vorlesung"
-                
                 with st.expander(f"{label}: {start.strftime('%H:%M')} - {end.strftime('%H:%M')}", expanded=is_current):
                     st.write(f"**Inhalt:** {summary}")
             
-            # Zeige die nächste freie Lücke an
-            st.divider()
             ist_belegt_jetzt = any(s <= current_now < e for s, e, sum in belegungen)
             if not ist_belegt_jetzt:
                 st.success(f"Raum {selected_raum} ist momentan frei.")
