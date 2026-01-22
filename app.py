@@ -5,10 +5,12 @@ import recurring_ical_events
 from datetime import datetime, timedelta, time
 import re
 import pytz
+import json
+from pathlib import Path
 
-# --- KONFIGURATION & DATEN ---
-# Zeitzone für Berlin definieren
+# --- KONFIGURATION & DATEIPFADE ---
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
+CACHE_FILE = Path("calendars_cache.json")
 
 COURSE_IDS = [
     "FN-TEA22", "FN-TEA23", "FN-TEA23A", "FN-TEA23B", "FN-TEA24A", "FN-TEA24B", "FN-TEA25", "FN-TEA25A", "FN-TEA25B",
@@ -32,53 +34,100 @@ def extrahiere_raum_code(location_str):
     return match.group(1) if match else None
 
 def normalize_to_berlin(dt):
-    """Konvertiert datetime-Objekte (naiv oder aware) korrekt nach Europe/Berlin."""
     if isinstance(dt, datetime):
         if dt.tzinfo is None:
             return BERLIN_TZ.localize(dt)
         return dt.astimezone(BERLIN_TZ)
     return dt
 
-@st.cache_data(ttl=3600)
-def fetch_all_calendars():
+def get_today_str():
+    return datetime.now(BERLIN_TZ).strftime("%Y-%m-%d")
+
+# --- DATEN-MANAGEMENT (CACHE) ---
+
+def fetch_and_cache_data():
+    """Lädt alle Kalender von der API und speichert sie lokal."""
     calendars = {}
-    for c_id in COURSE_IDS:
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, c_id in enumerate(COURSE_IDS):
+        status_text.text(f"Synchronisiere Kurs: {c_id}...")
         try:
             r = requests.get(f"https://dhbw.app/ical/{c_id}", timeout=10)
             if r.status_code == 200:
                 calendars[c_id] = r.text
-        except: continue
+        except:
+            continue
+        progress_bar.progress((i + 1) / len(COURSE_IDS))
+    
+    cache_content = {
+        "last_sync": get_today_str(),
+        "data": calendars
+    }
+    
+    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache_content, f, ensure_ascii=False)
+    
+    status_text.empty()
+    progress_bar.empty()
     return calendars
+
+def load_data():
+    """Lädt Daten aus dem Cache oder erzwingt Sync, wenn veraltet."""
+    today = get_today_str()
+    
+    if CACHE_FILE.exists():
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                cache_content = json.load(f)
+                if cache_content.get("last_sync") == today:
+                    return cache_content["data"], True
+        except:
+            pass
+            
+    # Falls kein Cache oder veraltet: Neu laden
+    return fetch_and_cache_data(), False
 
 # --- UI SETUP ---
 st.set_page_config(page_title="DHBW Raumfinder", page_icon="🏫")
 st.title("🏫 DHBW Raum-Checker FN")
 
-# Filter-Optionen
+# Daten laden (einmalig pro App-Start/Refresh)
+all_data, was_cached = load_data()
+
 with st.sidebar:
-    st.header("Filter & Einstellungen")
+    st.header("Daten-Status")
+    if was_cached:
+        st.success("Daten sind auf dem neuesten Stand.")
+    else:
+        st.info("Daten wurden soeben frisch geladen.")
+    
+    if st.button("Jetzt manuell synchronisieren"):
+        all_data = fetch_and_cache_data()
+        st.rerun()
+
+    st.divider()
     gebaeude_filter = st.selectbox("Gebäude wählen:", ["Alle Gebäude", "N Gebäude", "H Gebäude", "E Gebäude"])
     filter_char = gebaeude_filter[0] if gebaeude_filter != "Alle Gebäude" else ""
 
-# Modus-Auswahl
-modus = st.radio("Zeitpunkt wählen:", ["Jetzt prüfen", "Anderer Zeitpunkt"], horizontal=True)
+# Modus-Auswahl im Hauptbereich
+modus = st.radio("Zeitpunkt der Prüfung:", ["Jetzt", "Spezifisches Datum/Uhrzeit"], horizontal=True)
 
-if modus == "Jetzt prüfen":
+if modus == "Jetzt":
     target_dt = datetime.now(BERLIN_TZ)
 else:
     col1, col2 = st.columns(2)
     with col1:
-        d = st.date_input("Datum:", datetime.now(BERLIN_TZ).date())
+        d = st.date_input("Datum wählen:", datetime.now(BERLIN_TZ).date())
     with col2:
-        t = st.time_input("Uhrzeit:", datetime.now(BERLIN_TZ).time())
+        t = st.time_input("Uhrzeit wählen:", datetime.now(BERLIN_TZ).time())
     target_dt = BERLIN_TZ.localize(datetime.combine(d, t))
 
-# --- HAUPTLOGIK ---
+# --- ANALYSE-LOGIK ---
 if st.button("Verfügbarkeit prüfen", type="primary"):
-    with st.spinner("Analysiere Zeitpläne..."):
-        all_data = fetch_all_calendars()
-        
-        # Zeitbereich für den gewählten Tag definieren
+    with st.spinner("Analysiere Raumbelegungen..."):
+        # Zeitbereich für den gesamten Ziel-Tag (für recurring events nötig)
         day_start = BERLIN_TZ.localize(datetime.combine(target_dt.date(), time.min))
         day_end = BERLIN_TZ.localize(datetime.combine(target_dt.date(), time.max))
         
@@ -101,23 +150,19 @@ if st.button("Verfügbarkeit prüfen", type="primary"):
                         raum_belegungen[raum].append((start, end))
             except: continue
 
-        # Ergebnisse auswerten
+        # Ergebnisse filtern und aufbereiten
         ergebnisse = []
         for raum in inventar:
-            # Gebäude-Filter anwenden
             if filter_char and not raum.startswith(filter_char): continue
             
             belegungen = sorted(raum_belegungen.get(raum, []), key=lambda x: x[0])
-            
             ist_belegt = False
             naechster_start = None
             
             for start, end in belegungen:
-                # Prüfen, ob target_dt im Zeitfenster liegt
                 if start <= target_dt < end:
                     ist_belegt = True
                     break
-                # Den nächsten Termin nach target_dt finden
                 if start > target_dt:
                     naechster_start = start
                     break
@@ -129,13 +174,12 @@ if st.button("Verfügbarkeit prüfen", type="primary"):
         # --- ANZEIGE ---
         ergebnisse.sort()
         st.divider()
-        st.subheader(f"Ergebnisse für {target_dt.strftime('%d.%m.%Y - %H:%M')}:")
+        st.subheader(f"Freie Räume am {target_dt.strftime('%d.%m.')} um {target_dt.strftime('%H:%M')}:")
         
         if ergebnisse:
-            for raum, bis in ergebnisse:
-                with st.container():
-                    col_r, col_t = st.columns([1, 2])
-                    col_r.success(f"**{raum}**")
-                    col_t.info(f"Frei bis {bis}")
+            cols = st.columns(2) # Zweispaltige Anzeige für bessere Übersicht
+            for idx, (raum, bis) in enumerate(ergebnisse):
+                with cols[idx % 2].container():
+                    st.info(f"**{raum}** \n(Frei bis {bis})")
         else:
-            st.error("Keine freien Räume zum gewählten Zeitpunkt gefunden.")
+            st.error("Keine freien Räume gefunden.")
