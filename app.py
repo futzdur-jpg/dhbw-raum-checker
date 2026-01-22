@@ -4,8 +4,11 @@ from icalendar import Calendar
 import recurring_ical_events
 from datetime import datetime, timedelta, time
 import re
+import pytz  # Neu: Für die Zeitzonen-Verwaltung
 
 # --- KONFIGURATION & DATEN ---
+BERLIN_TZ = pytz.timezone("Europe/Berlin") # Zeitzone definieren
+
 COURSE_IDS = [
     "FN-TEA22", "FN-TEA23", "FN-TEA23A", "FN-TEA23B", "FN-TEA24A", "FN-TEA24B", "FN-TEA25", "FN-TEA25A", "FN-TEA25B",
     "FN-TEU22", "FN-TEU23", "FN-TEU24", "FN-TEU25", "FN-TFE22-1", "FN-TFE22-2", "FN-TFE23-1", "FN-TFE23-2", "FN-TFE24-1",
@@ -25,7 +28,7 @@ def extrahiere_raum_code(location_str):
     match = re.search(r'([A-Z]\d{3})', str(location_str))
     return match.group(1) if match else None
 
-@st.cache_data(ttl=3600) # Cache für eine Stunde
+@st.cache_data(ttl=3600)
 def fetch_all_calendars():
     calendars = {}
     for c_id in COURSE_IDS:
@@ -35,6 +38,14 @@ def fetch_all_calendars():
                 calendars[c_id] = r.text
         except: continue
     return calendars
+
+# Hilfsfunktion zur Normalisierung der Zeit auf Berlin
+def normalize_to_berlin(dt):
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            return BERLIN_TZ.localize(dt)
+        return dt.astimezone(BERLIN_TZ)
+    return dt
 
 # --- UI SETUP ---
 st.set_page_config(page_title="DHBW Raumfinder", page_icon="🏫")
@@ -46,29 +57,29 @@ filter_char = gebaeude_filter[0] if gebaeude_filter != "Alle Gebäude" else ""
 if st.button("Jetzt prüfen", type="primary"):
     with st.spinner("Analysiere Zeitpläne..."):
         all_data = fetch_all_calendars()
-        now = datetime.now()
-        # Zeitbereich für "heute" definieren
-        today_start = datetime.combine(now.date(), time.min)
-        today_end = datetime.combine(now.date(), time.max)
+        
+        # Aktuelle Zeit in Berlin
+        now = datetime.now(BERLIN_TZ)
+        
+        # Zeitbereich für "heute" (Berlin-Zeit)
+        today_start = BERLIN_TZ.localize(datetime.combine(now.date(), time.min))
+        today_end = BERLIN_TZ.localize(datetime.combine(now.date(), time.max))
         
         inventar = set()
-        raum_belegungen = {} # raum: [start_zeiten_der_vorlesungen]
+        raum_belegungen = {}
 
         for c_id, ics_text in all_data.items():
             try:
                 cal = Calendar.from_ical(ics_text)
-                # Alle Events für heute laden
                 events_today = recurring_ical_events.of(cal).between(today_start, today_end)
                 
                 for event in events_today:
                     raum = extrahiere_raum_code(event.get("LOCATION"))
                     if raum:
                         inventar.add(raum)
-                        start = event.get("DTSTART").dt
-                        # Falls Zeitzone im Kalender, auf "naive" umwandeln für Vergleich
-                        if hasattr(start, "tzinfo"): start = start.replace(tzinfo=None)
-                        end = event.get("DTEND").dt
-                        if hasattr(end, "tzinfo"): end = end.replace(tzinfo=None)
+                        # Zeiten extrahieren und auf Berlin normalisieren
+                        start = normalize_to_berlin(event.get("DTSTART").dt)
+                        end = normalize_to_berlin(event.get("DTEND").dt)
                         
                         if raum not in raum_belegungen: raum_belegungen[raum] = []
                         raum_belegungen[raum].append((start, end))
@@ -85,6 +96,7 @@ if st.button("Jetzt prüfen", type="primary"):
             naechster_start = None
             
             for start, end in belegungen:
+                # Vergleich findet nun konsistent in der Berlin-Zeitzone statt
                 if start <= now <= end:
                     ist_belegt = True
                     break
@@ -107,5 +119,4 @@ if st.button("Jetzt prüfen", type="primary"):
                     col1.success(f"**{raum}**")
                     col2.info(f"Frei bis {bis}")
         else:
-
             st.error("Keine freien Räume gefunden.")
