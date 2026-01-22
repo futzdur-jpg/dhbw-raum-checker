@@ -4,10 +4,11 @@ from icalendar import Calendar
 import recurring_ical_events
 from datetime import datetime, timedelta, time
 import re
-import pytz  # Neu: Für die Zeitzonen-Verwaltung
+import pytz
 
 # --- KONFIGURATION & DATEN ---
-BERLIN_TZ = pytz.timezone("Europe/Berlin") # Zeitzone definieren
+# Zeitzone für Berlin definieren
+BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
 COURSE_IDS = [
     "FN-TEA22", "FN-TEA23", "FN-TEA23A", "FN-TEA23B", "FN-TEA24A", "FN-TEA24B", "FN-TEA25", "FN-TEA25A", "FN-TEA25B",
@@ -23,10 +24,20 @@ COURSE_IDS = [
     "FN-TWI24-2", "FN-TWI25-1", "FN-TWI25-2"
 ]
 
+# --- HILFSFUNKTIONEN ---
+
 def extrahiere_raum_code(location_str):
     if not location_str: return None
     match = re.search(r'([A-Z]\d{3})', str(location_str))
     return match.group(1) if match else None
+
+def normalize_to_berlin(dt):
+    """Konvertiert datetime-Objekte (naiv oder aware) korrekt nach Europe/Berlin."""
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            return BERLIN_TZ.localize(dt)
+        return dt.astimezone(BERLIN_TZ)
+    return dt
 
 @st.cache_data(ttl=3600)
 def fetch_all_calendars():
@@ -39,31 +50,37 @@ def fetch_all_calendars():
         except: continue
     return calendars
 
-# Hilfsfunktion zur Normalisierung der Zeit auf Berlin
-def normalize_to_berlin(dt):
-    if isinstance(dt, datetime):
-        if dt.tzinfo is None:
-            return BERLIN_TZ.localize(dt)
-        return dt.astimezone(BERLIN_TZ)
-    return dt
-
 # --- UI SETUP ---
 st.set_page_config(page_title="DHBW Raumfinder", page_icon="🏫")
 st.title("🏫 DHBW Raum-Checker FN")
 
-gebaeude_filter = st.selectbox("Gebäude wählen:", ["Alle Gebäude", "N Gebäude", "H Gebäude", "E Gebäude"])
-filter_char = gebaeude_filter[0] if gebaeude_filter != "Alle Gebäude" else ""
+# Filter-Optionen
+with st.sidebar:
+    st.header("Filter & Einstellungen")
+    gebaeude_filter = st.selectbox("Gebäude wählen:", ["Alle Gebäude", "N Gebäude", "H Gebäude", "E Gebäude"])
+    filter_char = gebaeude_filter[0] if gebaeude_filter != "Alle Gebäude" else ""
 
-if st.button("Jetzt prüfen", type="primary"):
+# Modus-Auswahl
+modus = st.radio("Zeitpunkt wählen:", ["Jetzt prüfen", "Anderer Zeitpunkt"], horizontal=True)
+
+if modus == "Jetzt prüfen":
+    target_dt = datetime.now(BERLIN_TZ)
+else:
+    col1, col2 = st.columns(2)
+    with col1:
+        d = st.date_input("Datum:", datetime.now(BERLIN_TZ).date())
+    with col2:
+        t = st.time_input("Uhrzeit:", datetime.now(BERLIN_TZ).time())
+    target_dt = BERLIN_TZ.localize(datetime.combine(d, t))
+
+# --- HAUPTLOGIK ---
+if st.button("Verfügbarkeit prüfen", type="primary"):
     with st.spinner("Analysiere Zeitpläne..."):
         all_data = fetch_all_calendars()
         
-        # Aktuelle Zeit in Berlin
-        now = datetime.now(BERLIN_TZ)
-        
-        # Zeitbereich für "heute" (Berlin-Zeit)
-        today_start = BERLIN_TZ.localize(datetime.combine(now.date(), time.min))
-        today_end = BERLIN_TZ.localize(datetime.combine(now.date(), time.max))
+        # Zeitbereich für den gewählten Tag definieren
+        day_start = BERLIN_TZ.localize(datetime.combine(target_dt.date(), time.min))
+        day_end = BERLIN_TZ.localize(datetime.combine(target_dt.date(), time.max))
         
         inventar = set()
         raum_belegungen = {}
@@ -71,13 +88,12 @@ if st.button("Jetzt prüfen", type="primary"):
         for c_id, ics_text in all_data.items():
             try:
                 cal = Calendar.from_ical(ics_text)
-                events_today = recurring_ical_events.of(cal).between(today_start, today_end)
+                events_today = recurring_ical_events.of(cal).between(day_start, day_end)
                 
                 for event in events_today:
                     raum = extrahiere_raum_code(event.get("LOCATION"))
                     if raum:
                         inventar.add(raum)
-                        # Zeiten extrahieren und auf Berlin normalisieren
                         start = normalize_to_berlin(event.get("DTSTART").dt)
                         end = normalize_to_berlin(event.get("DTEND").dt)
                         
@@ -88,6 +104,7 @@ if st.button("Jetzt prüfen", type="primary"):
         # Ergebnisse auswerten
         ergebnisse = []
         for raum in inventar:
+            # Gebäude-Filter anwenden
             if filter_char and not raum.startswith(filter_char): continue
             
             belegungen = sorted(raum_belegungen.get(raum, []), key=lambda x: x[0])
@@ -96,11 +113,12 @@ if st.button("Jetzt prüfen", type="primary"):
             naechster_start = None
             
             for start, end in belegungen:
-                # Vergleich findet nun konsistent in der Berlin-Zeitzone statt
-                if start <= now <= end:
+                # Prüfen, ob target_dt im Zeitfenster liegt
+                if start <= target_dt < end:
                     ist_belegt = True
                     break
-                if start > now:
+                # Den nächsten Termin nach target_dt finden
+                if start > target_dt:
                     naechster_start = start
                     break
             
@@ -108,15 +126,16 @@ if st.button("Jetzt prüfen", type="primary"):
                 frei_bis = naechster_start.strftime("%H:%M") if naechster_start else "Ende des Tages"
                 ergebnisse.append((raum, frei_bis))
 
-        # Anzeige
+        # --- ANZEIGE ---
         ergebnisse.sort()
         st.divider()
+        st.subheader(f"Ergebnisse für {target_dt.strftime('%d.%m.%Y - %H:%M')}:")
+        
         if ergebnisse:
-            st.subheader(f"Freie Räume (Stand {now.strftime('%H:%M')}):")
             for raum, bis in ergebnisse:
                 with st.container():
-                    col1, col2 = st.columns([1, 2])
-                    col1.success(f"**{raum}**")
-                    col2.info(f"Frei bis {bis}")
+                    col_r, col_t = st.columns([1, 2])
+                    col_r.success(f"**{raum}**")
+                    col_t.info(f"Frei bis {bis}")
         else:
-            st.error("Keine freien Räume gefunden.")
+            st.error("Keine freien Räume zum gewählten Zeitpunkt gefunden.")
